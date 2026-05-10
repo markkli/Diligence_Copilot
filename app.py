@@ -4,6 +4,8 @@ import re
 
 import streamlit as st
 
+from diligence_engine import generate_company_outputs, slugify_company_name
+
 
 st.set_page_config(
     page_title="Diligence Workspace",
@@ -13,7 +15,7 @@ st.set_page_config(
 )
 
 PACKAGE_PATTERN = "*_diligence_package.json"
-DEFAULT_PACKAGE = "diligence_package.json"
+DATA_DIR = Path("Data")
 PRIMARY_ORDER = [
     "Commercial Diligence Memo",
     "Risk Dashboard",
@@ -35,18 +37,16 @@ SECTION_LABELS = {
 
 
 def find_package_files():
-    matches = sorted(Path(".").glob(PACKAGE_PATTERN))
-    default_path = Path(DEFAULT_PACKAGE)
-    if default_path.exists() and default_path not in matches:
-        matches.append(default_path)
-    return matches
+    return sorted(Path(".").glob(PACKAGE_PATTERN))
 
 
-def prettify_company_name(package_path: Path) -> str:
-    name = package_path.stem.replace("_diligence_package", "")
-    if name == "diligence_package":
-        return "Current Company"
-    return name.replace("_", " ").title()
+def prettify_company_name_from_slug(slug: str) -> str:
+    return slug.replace("_", " ").title()
+
+
+def package_slug_to_name(package_path: Path) -> str:
+    slug = package_path.stem.replace("_diligence_package", "")
+    return prettify_company_name_from_slug(slug)
 
 
 def load_package(package_path: Path):
@@ -130,10 +130,8 @@ def render_source_documents(section_value):
 def get_section_display_text(section_value):
     if section_value is None:
         return "Not generated yet"
-
     if isinstance(section_value, dict) and "output" in section_value:
         return section_value["output"]
-
     return str(section_value)
 
 
@@ -175,28 +173,94 @@ def count_source_docs(section_value):
     return 0
 
 
-package_files = find_package_files()
+def existing_company_names():
+    names = set()
+    if DATA_DIR.exists():
+        for path in DATA_DIR.iterdir():
+            if path.is_dir():
+                names.add(path.name)
+    for package_file in find_package_files():
+        names.add(package_slug_to_name(package_file))
+    return sorted(names)
+
+
+def package_path_for_company(company_name: str) -> Path:
+    return Path(f"{slugify_company_name(company_name)}_diligence_package.json")
+
+
+def save_uploaded_files(company_name: str, uploaded_files) -> Path:
+    company_folder = DATA_DIR / company_name
+    company_folder.mkdir(parents=True, exist_ok=True)
+    for uploaded_file in uploaded_files:
+        (company_folder / uploaded_file.name).write_bytes(uploaded_file.getbuffer())
+    return company_folder
+
 
 st.title("Diligence Workspace")
 st.caption(
-    "A first-pass commercial due diligence workspace that renders structured package outputs instead of raw notebook text."
+    "A first-pass commercial due diligence workspace that can now ingest PDFs, generate a diligence package, and render the structured output."
 )
 
-if not package_files:
-    st.error("No diligence package JSON files were found in the project folder.")
+DATA_DIR.mkdir(exist_ok=True)
+companies = existing_company_names()
+default_company = companies[0] if companies else "Guidewire"
+selected_existing_company = st.sidebar.selectbox("Company", companies if companies else [default_company])
+new_company_name = st.sidebar.text_input("Or create new company", value="")
+selected_company = new_company_name.strip() or selected_existing_company
+
+st.sidebar.header("Workspace")
+st.sidebar.markdown(f"**Company:** {selected_company}")
+company_folder = DATA_DIR / selected_company
+company_folder.mkdir(parents=True, exist_ok=True)
+
+existing_docs = sorted(path.name for path in company_folder.glob("*.pdf"))
+st.sidebar.markdown(f"**Current documents:** {len(existing_docs)}")
+if existing_docs:
+    with st.sidebar.expander("View company files"):
+        for doc in existing_docs:
+            st.markdown(f"- {doc}")
+
+st.sidebar.header("Uploads")
+uploaded_files = st.sidebar.file_uploader(
+    "Upload company PDFs",
+    type=["pdf"],
+    accept_multiple_files=True,
+)
+
+if uploaded_files:
+    st.sidebar.caption(f"{len(uploaded_files)} file(s) ready to save")
+    if st.sidebar.button("Save uploaded files", use_container_width=True):
+        save_uploaded_files(selected_company, uploaded_files)
+        st.sidebar.success("Files saved to company folder.")
+        st.rerun()
+
+st.sidebar.header("Generation")
+if st.sidebar.button("Generate Diligence Package", use_container_width=True):
+    with st.spinner("Generating chunks, embeddings, package, and report. This may take a while..."):
+        package, chunks_path, package_path, report_path = generate_company_outputs(
+            company_name=selected_company,
+            company_folder=company_folder,
+            base_dir=Path("."),
+        )
+    st.session_state["last_generated_company"] = selected_company
+    st.session_state["last_generated_paths"] = {
+        "chunks": str(chunks_path),
+        "package": str(package_path),
+        "report": str(report_path),
+    }
+    st.success("Diligence package generated successfully.")
+    st.rerun()
+
+package_path = package_path_for_company(selected_company)
+if not package_path.exists():
+    st.info("No generated diligence package found yet for this company. Upload or use existing PDFs, then click Generate Diligence Package.")
     st.stop()
 
-package_options = {prettify_company_name(path): path for path in package_files}
-company_name = st.sidebar.selectbox("Company", list(package_options.keys()))
-selected_package = package_options[company_name]
-diligence_package = load_package(selected_package)
+diligence_package = load_package(package_path)
 sections = package_to_sections(diligence_package)
 ordered = ordered_sections(sections)
 source_doc_count = count_source_docs(diligence_package.get("source_documents"))
 
-st.sidebar.header("Workspace")
-st.sidebar.markdown(f"**Company:** {company_name}")
-st.sidebar.markdown(f"**Package File:** `{selected_package.name}`")
 focus_section = st.sidebar.selectbox(
     "Focus section",
     ["Full report"] + [name for name, _ in ordered],
@@ -206,12 +270,15 @@ st.sidebar.header("Included Sections")
 for name, _ in ordered:
     st.sidebar.markdown(f"- {name}")
 
-st.sidebar.header("Roadmap")
-st.sidebar.caption("Next likely product steps: uploads, regeneration, live/public-source ingestion, and charts from structured package fields.")
+last_generated_paths = st.session_state.get("last_generated_paths")
+if last_generated_paths and st.session_state.get("last_generated_company") == selected_company:
+    st.sidebar.header("Latest Output")
+    st.sidebar.markdown(f"- Package: `{Path(last_generated_paths['package']).name}`")
+    st.sidebar.markdown(f"- Report: `{Path(last_generated_paths['report']).name}`")
 
 hero_left, hero_mid, hero_right = st.columns([3, 1, 1])
 with hero_left:
-    st.markdown(f"## {company_name}")
+    st.markdown(f"## {selected_company}")
     st.write(
         "This workspace is driven by the structured diligence package and is meant to feel closer to a PE / M&A workbench than a generic document chat tool."
     )
