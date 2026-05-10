@@ -372,14 +372,14 @@ Return only the final evidence table.
 
 
 def gather_workflow_evidence(
-    chunks: list[dict[str, Any]],
-    workflow_name: str,
-    company_name: str,
-    client: OpenAI | None = None,
-    top_k_per_query: int = 5,
-    min_per_query: int = 2,
-    max_context_chunks: int = 12,
-) -> dict[str, Any]:
+        chunks: list[dict[str, Any]],
+        workflow_name: str,
+        company_name: str,
+        client: OpenAI | None = None,
+        top_k_per_query: int = 5,
+        min_per_query: int = 2,
+        max_context_chunks: int = 12,
+    ) -> dict[str, Any]:
     workflow_queries = get_workflow_queries(company_name).get(workflow_name, [])
     if len(workflow_queries) * min_per_query > max_context_chunks:
         raise ValueError("min_per_query is too large for max_context_chunks")
